@@ -1,0 +1,232 @@
+===============================================================
+ GERMINADOR IoT — BACKEND FastAPI
+ Guía de inicialización y puesta en marcha
+===============================================================
+
+
+-----------------------------------------------------------------
+ 0. REQUISITOS PREVIOS
+-----------------------------------------------------------------
+
+- Python 3.11 o superior
+- pip
+- (Opcional) curl o Postman para probar los endpoints
+- En Windows: PowerShell
+
+
+-----------------------------------------------------------------
+ 1. PREPARAR EL ENTORNO VIRTUAL
+-----------------------------------------------------------------
+
+Dentro de la carpeta coffe_germinator_python/:
+
+  # Crear el venv (si aún no existe)
+  python -m venv .venv
+
+  # Activarlo
+  # Windows PowerShell:
+  .\.venv\Scripts\Activate.ps1
+  # Windows CMD:
+  .venv\Scripts\activate.bat
+  # Linux / macOS:
+  source .venv/bin/activate
+
+Deberías ver "(.venv)" al inicio del prompt.
+
+
+-----------------------------------------------------------------
+ 2. INSTALAR DEPENDENCIAS
+-----------------------------------------------------------------
+
+  pip install -r requirements.txt
+
+Esto instala únicamente lo necesario:
+  - fastapi
+  - uvicorn[standard]
+  - sqlalchemy
+  - pydantic
+  - python-dotenv
+
+
+-----------------------------------------------------------------
+ 3. CONFIGURAR EL ARCHIVO .env
+-----------------------------------------------------------------
+
+  # Copia la plantilla
+  copy .env.example .env          (Windows)
+  cp   .env.example .env          (Linux / macOS)
+
+Edita .env y rellena los valores:
+
+  API_TOKEN=<token largo y aleatorio>
+  DATABASE_URL=sqlite:///./germinador.db
+  CORS_ORIGINS=
+  PORT=8001
+
+Para generar un API_TOKEN seguro:
+
+  # PowerShell:
+  -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
+
+  # Linux / macOS:
+  openssl rand -hex 32
+
+IMPORTANTE: el MISMO valor debe ir en:
+  - este .env
+  - el secrets.h del firmware ESP32 (DEVICE_TOKEN)
+  - el local.properties de la app Android (API_TOKEN)
+
+Si dejas API_TOKEN vacío, el backend acepta cualquier request y
+loguea un WARNING. Sólo úsalo durante pruebas locales.
+
+
+-----------------------------------------------------------------
+ 4. LEVANTAR EL SERVIDOR
+-----------------------------------------------------------------
+
+Desarrollo (con auto-reload):
+
+  python main.py
+
+Producción (recomendado, sin reload):
+
+  uvicorn main:app --host 0.0.0.0 --port 8001
+
+Al primer arranque verás en los logs:
+
+  INFO  Setpoints inicializados con valores por defecto.
+
+Eso significa que la tabla "setpoints" se creó con la fila id=1.
+
+
+-----------------------------------------------------------------
+ 5. VERIFICAR QUE FUNCIONA
+-----------------------------------------------------------------
+
+Health check (no requiere token):
+
+  curl http://localhost:8001/health
+
+Obtener setpoints (requiere token):
+
+  curl http://localhost:8001/api/setpoints `
+       -H "X-Device-Token: TU_TOKEN_AQUI"
+
+Documentación interactiva (Swagger UI) en el navegador:
+
+  http://localhost:8001/docs
+
+
+-----------------------------------------------------------------
+ 6. ENDPOINTS DISPONIBLES
+-----------------------------------------------------------------
+
+  POST /api/telemetria       Recibe lecturas del ESP32 (requiere token)
+  GET  /api/estado           Último estado registrado
+  GET  /api/historico        Histórico (?horas=24&limit=500)
+  GET  /api/setpoints        Umbrales de control vigentes
+  PUT  /api/setpoints        Actualiza umbrales (validación de histéresis)
+  GET  /health               Health check público
+
+
+-----------------------------------------------------------------
+ 7. ARCHIVOS RELEVANTES
+-----------------------------------------------------------------
+
+  main.py             Toda la API (modelos, schemas, endpoints)
+  requirements.txt    Dependencias (limpio, UTF-8)
+  .env                Tus secretos — NO se sube a Git
+  .env.example        Plantilla para compañeros
+  .gitignore          Ignora .venv, .env, *.db, __pycache__
+  germinador.db       SQLite local (se crea solo al arrancar)
+
+
+-----------------------------------------------------------------
+ 8. CONSEJOS DE PRODUCCIÓN
+-----------------------------------------------------------------
+
+- Detrás de un reverse proxy con HTTPS (Caddy, Nginx, Traefik).
+  Mientras tanto la app Android tiene cleartext habilitado SOLO
+  para la IP/host declarado en network_security_config.xml.
+
+- Si vas a más de un usuario/dispositivo concurrente, migra a
+  PostgreSQL cambiando DATABASE_URL en .env, por ejemplo:
+    DATABASE_URL=postgresql+psycopg://user:pass@host:5432/germinador
+
+- Considera un cron diario que purgue filas antiguas:
+    DELETE FROM telemetria
+    WHERE timestamp < datetime('now', '-90 days');
+
+- Para correr como servicio (Linux):
+    /etc/systemd/system/germinador.service con uvicorn como ExecStart.
+
+- Para correr como servicio (Windows): NSSM o Task Scheduler.
+
+
+-----------------------------------------------------------------
+ 9. PROBLEMAS FRECUENTES
+-----------------------------------------------------------------
+
+* "ModuleNotFoundError: dotenv"
+    → No activaste el venv o no instalaste requirements.txt.
+
+* El ESP32 recibe 401
+    → El DEVICE_TOKEN del firmware no coincide con API_TOKEN del .env.
+      Revisa los dos lados. Recompila el firmware si cambias el token.
+
+* La app Android no se conecta
+    → 1) Verifica BASE_URL en local.properties (con / final, ej. http://192.168.1.56:8001/)
+      2) Verifica que la IP del PC y del móvil estén en la misma red.
+      3) Revisa que la IP del PC esté en network_security_config.xml
+         (192.168.1.56 ya está, pero ajustala si cambia).
+      4) Firewall de Windows: permite Python/uvicorn en redes privadas.
+
+* "no such table: telemetria"
+    → La DB se corrompió o falta. Borra germinador.db y reinicia
+      el servidor; se recreará vacía con su esquema.
+
+* Quieres reiniciar los setpoints a sus defaults
+    → DELETE FROM setpoints WHERE id=1;
+      Al siguiente arranque, _bootstrap_setpoints() los recrea.
+
+* Tras agregar columnas nuevas al modelo (ej. sensor de nivel de agua)
+    → SQLAlchemy create_all() NO migra columnas en tablas existentes.
+      Detén el servidor, borra germinador.db y vuelve a arrancar:
+        del germinador.db          (Windows)
+        rm  germinador.db          (Linux / macOS)
+      La tabla se recrea con el esquema nuevo y los setpoints se
+      reinicializan con sus defaults.
+
+
+-----------------------------------------------------------------
+ 10. CALIBRAR EL SENSOR DE NIVEL DE AGUA (HC-SR04)
+-----------------------------------------------------------------
+
+El HC-SR04 mide la distancia del sensor al agua. Tienes que decirle
+al sistema qué distancia equivale a 0% (tanque vacío) y a 100% (lleno).
+
+Pasos:
+
+  1) Con el tanque COMPLETAMENTE VACÍO, observa la pantalla del ESP32
+     o consulta GET /api/estado:
+       "nivel_agua_cm": 14.2
+     Anota ese valor → será tu "nivel_vacio_cm".
+
+  2) Llena el tanque hasta donde lo vas a operar normalmente, mira de
+     nuevo la distancia:
+       "nivel_agua_cm": 3.5
+     Anota → será tu "nivel_lleno_cm".
+
+  3) Desde la app (icono ⚙ del dashboard) ajusta:
+       Vacío  (cm) = 14.2
+       Lleno  (cm) = 3.5
+       Corte de bomba si nivel < (%) = 15
+
+  4) Guarda. El ESP32 lee los nuevos setpoints en menos de 30 s.
+
+Lógica de seguridad: si el nivel cae por debajo del % de corte, la
+bomba NO se enciende aunque la humedad de suelo esté bajísima. En el
+serial monitor verás "[Bomba] CORTE por nivel de agua bajo." y la
+tarjeta del dashboard se pondrá roja con el aviso correspondiente.
+
+===============================================================
